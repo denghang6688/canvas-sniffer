@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header class="head">
+    <div class="logo">S</div>
+    <div class="head-txt">
+      <h1>素材嗅探助手</h1>
+      <div class="src"><span id="liveDot" class="live"></span><span id="statusText">正在扫描…</span></div>
+    </div>
+    <button id="btnOptions" class="icon-btn" title="设置">⚙</button>
+    <button id="btnRefresh" class="icon-btn" title="重新扫描">⟳</button>
+  </header>
+
+  <div id="canvasBar" class="canvas-bar off">
+    <span class="plug">◉</span>
+    <span id="canvasText">画布连接中…</span>
+    <span class="url" id="canvasUrl">127.0.0.1:2000</span>
+  </div>
+
+  <div class="toolbar">
+    <input id="search" type="text" placeholder="搜索文件名 / 文字 / URL…" autocomplete="off" />
+    <select id="sortBy" title="排序">
+      <option value="size">尺寸优先</option>
+      <option value="time">捕获时间</option>
+      <option value="name">名称</option>
+    </select>
+  </div>
+
+  <nav class="chips" id="chips">
+    <div class="chip on" data-f="all">全部 <span class="n" id="nAll">0</span></div>
+    <div class="chip" data-f="image">图片 <span class="n" id="nImg">0</span></div>
+    <div class="chip" data-f="video">视频 <span class="n" id="nVid">0</span></div>
+    <div class="chip" data-f="text">文字 <span class="n" id="nTxt">0</span></div>
+  </nav>
+
+  <div class="toggles">
+    <div class="tg" id="tgLow"><span class="sw"></span>低分过滤</div>
+    <div class="tg" id="tgDig"><span class="sw"></span>深挖原图</div>
+    <div class="tg" id="tgAI"><span class="sw"></span>AI 分类</div>
+  </div>
+
+  <div class="grid" id="list">
+    <div class="empty" id="empty">正在嗅探页面素材…</div>
+  </div>
+
+  <div class="progress-wrap" id="progressWrap" hidden>
+    <div class="progress-bar"><i id="progressFill"></i></div>
+    <div class="progress-text" id="progressText"></div>
+  </div>
+
+  <footer class="foot">
+    <div class="selinfo"><span id="footInfo">正在嗅探…</span></div>
+    <button class="btn ghost" id="btnOpenCanvas">打开画布</button>
+  </footer>
+
+  <div class="lightbox" id="lightbox" hidden>
+    <div class="lb-head">
+      <span id="lbTitle">预览</span>
+      <button id="lbClose" class="icon-btn" title="关闭">×</button>
+    </div>
+    <div class="lb-stage" id="lbStage"></div>
+    <div class="lb-meta" id="lbMeta"></div>
+    <div class="lb-url" id="lbUrl"></div>
+    <div class="lb-acts">
+      <button id="lbSave" class="btn main">导入画布</button>
+      <button id="lbDownload" class="btn">下载</button>
+      <button id="lbCopy" class="btn">复制链接</button>
+    </div>
+    <div class="lb-nav">
+      <button id="lbPrev" class="btn ghost">← 上一个</button>
+      <button id="lbNext" class="btn ghost">下一个 →</button>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
