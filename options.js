@@ -1,6 +1,6 @@
 // options.js
 const DEFAULT_SETTINGS = {
-  canvasBase: 'http://127.0.0.1:2000',
+  canvasBase: 'http://127.0.0.1:4000',
   minPx: 200,
   filterLow: true,
   digOriginal: true,

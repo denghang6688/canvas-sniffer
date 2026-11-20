@@ -8,6 +8,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (msg.type === 'runTask') {
     const task = { cancelled: false };
     tasks.set(msg.taskId, task);
+    try { reply({ ok: true }); } catch (e) { }
     runTask(msg, task)
       .catch((e) => done(msg.taskId, { ok: false, error: String(e && e.message || e) }))
       .finally(() => tasks.delete(msg.taskId));
@@ -195,9 +196,11 @@ async function saveToCanvas(msg, task) {
   const assets = msg.assets || [];
   const settings = msg.settings || {};
   const tab = msg.tab || {};
-  const base = (settings.canvasBase || 'http://127.0.0.1:2000').replace(/\/+$/, '');
+  const base = (settings.canvasBase || 'http://127.0.0.1:4000').replace(/\/+$/, '');
   const folder = folderName(tab, settings);
   const credentials = settings.hlsCredentials ? 'include' : 'omit';
+  // 画布接口需要登录态：fetch 必须携带 cookie（credentials: 'include'）
+  const canvasFetch = (url, opts = {}) => fetchRaw(url, { ...opts, credentials: 'include' }, 30000);
   let imported = 0, uploaded = 0, failed = 0;
   const notes = [];
 
@@ -206,7 +209,7 @@ async function saveToCanvas(msg, task) {
   if (direct.length) {
     progress(msg.taskId, `画布下载中：${direct.length} 个直链素材…`, 20);
     try {
-      const r = await fetchRaw(base + '/api/local-assets/import-urls', {
+      const r = await canvasFetch(base + '/api/local-assets/import-urls', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -252,7 +255,7 @@ async function saveToCanvas(msg, task) {
       const fd = new FormData();
       fd.append('files', blob, safeName(a));
       if (folder) fd.append('folder', folder);
-      const r = await fetchRaw(base + '/api/local-assets/upload', { method: 'POST', body: fd });
+      const r = await canvasFetch(base + '/api/local-assets/upload', { method: 'POST', body: fd });
       const j = await r.json().catch(() => ({}));
       if (j.count > 0 || j.files || j.ok) uploaded++; else failed++;
     } catch (e) {
@@ -272,7 +275,7 @@ async function saveToCanvas(msg, task) {
     });
     if (folder) fd.append('folder', folder);
     try {
-      const r = await fetchRaw(base + '/api/local-assets/upload', { method: 'POST', body: fd });
+      const r = await canvasFetch(base + '/api/local-assets/upload', { method: 'POST', body: fd });
       const j = await r.json().catch(() => ({}));
       if (j.count) uploaded += j.count; else if (j.ok) uploaded += texts.length; else failed += texts.length;
     } catch (e) {
@@ -286,7 +289,21 @@ async function saveToCanvas(msg, task) {
   return { ok: failed === 0, imported, uploaded, failed, message: text };
 }
 
-/* ---------------- 任务：下载 ---------------- */
+/* ---------------- 任务：下载 ----------------
+   offscreen 文档没有 chrome.downloads API，统一把下载请求转给
+   background service worker 执行；blob 用 blob URL 传递（小文件走 data URL） */
+function bgDownload(url, filename) {
+  return new Promise((resolve, reject) => {
+    try {
+      chrome.runtime.sendMessage({ type: 'bgDownload', url, filename }, (res) => {
+        if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+        if (res && res.ok) resolve(res.id);
+        else reject(new Error((res && res.error) || '下载失败'));
+      });
+    } catch (e) { reject(e); }
+  });
+}
+
 async function downloadAssets(msg, task) {
   const assets = msg.assets || [];
   const settings = msg.settings || {};
@@ -299,13 +316,12 @@ async function downloadAssets(msg, task) {
     checkCancel(task);
     const a = assets[i];
     const label = `(${i + 1}/${assets.length}) ${safeName(a)}`;
+    const name = `${dir}/${safeName(a)}`;
     try {
-      let url = effUrl(a);
-      let objectUrl = false;
       if (a.kind === 'text') {
         const blob = new Blob([a.text || ''], { type: 'text/plain;charset=utf-8' });
-        url = URL.createObjectURL(blob);
-        objectUrl = true;
+        const dataUrl = await blobToDataUrl(blob);
+        await bgDownload(dataUrl, name);
       } else if (a.kind === 'hls') {
         progress(msg.taskId, `合并 HLS：${label}`, 5);
         const blob = await mergeHls(a.bestVariant || effUrl(a), {
@@ -315,16 +331,18 @@ async function downloadAssets(msg, task) {
           onProgress: (d, total) => progress(msg.taskId,
             `合并 HLS：${label} ${d}/${total} 段`, 5 + (d / total) * 85)
         });
-        url = URL.createObjectURL(blob);
-        objectUrl = true;
+        const burl = URL.createObjectURL(blob);
+        try {
+          await bgDownload(burl, name);
+        } catch (e1) {
+          // blob URL 下载失败时退回 data URL（适合较小文件）
+          const dataUrl = await blobToDataUrl(blob);
+          await bgDownload(dataUrl, name);
+        }
+        setTimeout(() => URL.revokeObjectURL(burl), 60000);
+      } else {
+        await bgDownload(effUrl(a), name);
       }
-      await chrome.downloads.download({
-        url,
-        filename: `${dir}/${safeName(a)}`,
-        conflictAction: 'uniquify',
-        saveAs: false
-      });
-      if (objectUrl) setTimeout(() => URL.revokeObjectURL(url), 60000);
       ok++;
     } catch (e) {
       fail++;

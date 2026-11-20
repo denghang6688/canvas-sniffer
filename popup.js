@@ -1,6 +1,6 @@
 // popup.js — 预览优先界面：卡片网格 / 大预览 / 单文件导入下载
 const DEFAULT_SETTINGS = {
-  canvasBase: 'http://127.0.0.1:2000',
+  canvasBase: 'http://127.0.0.1:4000',
   minPx: 200,
   filterLow: true,
   digOriginal: true,
@@ -447,9 +447,11 @@ function startTask(action, assets) {
     settings: state.settings, tab: state.tab
   }, (res) => {
     if (!res || !res.ok) {
+      const errText = (res && res.error) || '未知错误';
       state.activeTask = null;
-      showProgress('任务启动失败：' + (res && res.error || '未知错误'), 100);
-      hideProgress(4000);
+      showProgress('任务启动失败：' + errText, 100);
+      setStatus('任务启动失败：' + errText, false);
+      hideProgress(5000);
       render();
     }
   });

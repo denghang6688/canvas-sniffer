@@ -195,6 +195,23 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         }
       })().catch((e) => reply({ ok: false, error: String(e && e.message || e) }));
       return true;
+    case 'bgDownload':
+      // offscreen 没有 chrome.downloads，由这里代为下载（支持 http/blob/data URL）
+      try {
+        chrome.downloads.download({
+          url: msg.url,
+          filename: msg.filename,
+          conflictAction: 'uniquify',
+          saveAs: false
+        }, (id) => {
+          const err = chrome.runtime.lastError;
+          if (err || !id) reply({ ok: false, error: err ? err.message : '浏览器拒绝下载' });
+          else reply({ ok: true, id });
+        });
+      } catch (e) {
+        reply({ ok: false, error: String(e && e.message || e) });
+      }
+      return true;
     case 'startTask':
       (async () => {
         const taskId = msg.taskId || ('t' + Date.now() + Math.random().toString(36).slice(2, 6));
