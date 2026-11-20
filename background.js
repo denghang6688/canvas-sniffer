@@ -150,7 +150,7 @@ async function ensureWorker() {
   if (!creatingWorker) {
     creatingWorker = chrome.offscreen.createDocument({
       url: 'worker.html',
-      reasons: ['BLOBS'],
+      reasons: ['BLOBS', 'MEDIA_PARSER', 'DOM_SCRAPING'],
       justification: '合并 HLS 分片并完成素材下载与上传，避免关闭弹窗中断任务'
     }).catch((e) => { console.warn('创建 offscreen 失败', e); return null; })
       .finally(() => { creatingWorker = null; });
@@ -179,6 +179,20 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         const info = await resolveHls(msg.url, msg.credentials || 'omit');
         if (info.type === 'master') reply({ ok: true, master: true, variants: info.variants, ...info });
         else reply({ ok: true, master: false, ...info });
+      })().catch((e) => reply({ ok: false, error: String(e && e.message || e) }));
+      return true;
+    case 'hlsPoster':
+      (async () => {
+        const ok = await ensureWorker();
+        if (!ok) { reply({ ok: false, error: '后台任务环境初始化失败' }); return; }
+        try {
+          const res = await chrome.runtime.sendMessage({
+            type: 'hlsPosterRun', url: msg.url, credentials: msg.credentials || 'omit'
+          });
+          reply(res || { ok: false, error: '后台无响应' });
+        } catch (e) {
+          reply({ ok: false, error: String(e && e.message || e) });
+        }
       })().catch((e) => reply({ ok: false, error: String(e && e.message || e) }));
       return true;
     case 'startTask':

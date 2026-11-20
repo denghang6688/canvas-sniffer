@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "素材嗅探助手 · AI Studio",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "预览优先的素材嗅探：图片/视频大图预览、单文件导入画布或下载、加密 HLS 合并、深挖原图、AI 自动分类。",
   "minimum_chrome_version": "109",
   "icons": {

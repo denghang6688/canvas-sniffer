@@ -1,18 +1,18 @@
 {
   "name": "素材嗅探助手 · AI Studio",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "updatedAt": "2026-11-20",
-  "notes": "v2.0：预览优先界面（卡片网格 + 大预览层 + 单文件导入/下载）；长任务移到后台不中断；支持加密 HLS（AES-128）合并；深挖原图规则扩充；搜索与排序。",
+  "notes": "v2.1：M3U8/HLS 视频卡片显示真实首帧封面（fMP4 截帧 / TS 硬解），卡片与预览层同步显示分辨率；其余为 v2.0 功能：预览优先界面、后台任务不中断、加密 HLS（AES-128）合并、深挖原图、搜索排序。",
   "sources": {
     "github": {
       "repo": "denghang6688/canvas-sniffer",
       "page": "https://github.com/denghang6688/canvas-sniffer/releases/latest",
-      "zip": "https://github.com/denghang6688/canvas-sniffer/releases/latest/download/canvas-sniffer-v2.0.0.zip"
+      "zip": "https://github.com/denghang6688/canvas-sniffer/releases/latest/download/canvas-sniffer-v2.1.0.zip"
     },
     "modelscope": {
       "repo": "hans186/canvas-sniffer",
       "page": "https://www.modelscope.cn/models/hans186/canvas-sniffer",
-      "zip": "https://www.modelscope.cn/models/hans186/canvas-sniffer/resolve/master/canvas-sniffer-v2.0.0.zip"
+      "zip": "https://www.modelscope.cn/models/hans186/canvas-sniffer/resolve/master/canvas-sniffer-v2.1.0.zip"
     }
   }
 }

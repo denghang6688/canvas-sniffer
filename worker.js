@@ -3,7 +3,7 @@
 const tasks = new Map();
 const keyCache = new Map();
 
-chrome.runtime.onMessage.addListener((msg) => {
+chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   if (!msg || !msg.type) return;
   if (msg.type === 'runTask') {
     const task = { cancelled: false };
@@ -16,6 +16,10 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === 'cancelTask') {
     const t = tasks.get(msg.taskId);
     if (t) t.cancelled = true;
+  }
+  if (msg.type === 'hlsPosterRun') {
+    enqueuePoster(msg, reply);
+    return true;
   }
 });
 
@@ -344,4 +348,310 @@ async function runTask(msg, task) {
   } else {
     done(msg.taskId, { ok: false, error: '未知任务类型' });
   }
+}
+
+/* ---------------- HLS 首帧海报（卡片预览） ----------------
+   fMP4 分片：init 段 + 首个分片拼成 blob，用 <video> 解码截帧
+   TS 分片：解析出 H.264 Annex-B 关键帧，用 WebCodecs 硬解出画面 */
+const posterCache = new Map(); // url -> result（worker 存活期内复用）
+const posterQueue = [];
+let posterBusy = false;
+
+function enqueuePoster(req, reply) {
+  const cached = posterCache.get(req.url);
+  if (cached) { reply(cached); return; }
+  posterQueue.push({ req, reply });
+  drainPosters();
+}
+
+async function drainPosters() {
+  if (posterBusy) return;
+  posterBusy = true;
+  while (posterQueue.length) {
+    const { req, reply } = posterQueue.shift();
+    let result;
+    try {
+      result = await makeHlsPoster(req);
+      if (result && result.ok) {
+        if (posterCache.size > 20) posterCache.delete(posterCache.keys().next().value);
+        posterCache.set(req.url, result);
+      }
+    } catch (e) {
+      result = { ok: false, error: String(e && e.message || e) };
+    }
+    try { reply(result); } catch (e) { }
+  }
+  posterBusy = false;
+}
+
+function concatBytes(list) {
+  let n = 0;
+  list.forEach((b) => { n += b.length; });
+  const out = new Uint8Array(n);
+  let o = 0;
+  list.forEach((b) => { out.set(b, o); o += b.length; });
+  return out;
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(fr.result);
+    fr.onerror = () => reject(new Error('图片编码失败'));
+    fr.readAsDataURL(blob);
+  });
+}
+
+async function makeHlsPoster(req) {
+  const credentials = req.credentials || 'omit';
+  const { url, text } = await mediaPlaylist(req.url, credentials);
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const segUrls = lines.filter((l) => l && !l.startsWith('#')).map((l) => absUrl(l, url)).filter(Boolean);
+  if (!segUrls.length) throw new Error('播放列表里没有分片');
+  const mapLine = lines.find((l) => l.startsWith('#EXT-X-MAP:'));
+  const initUri = mapLine ? absUrl((mapLine.match(/URI="([^"]+)"/i) || [])[1] || '', url) : '';
+  const keyLine = lines.find((l) => l.startsWith('#EXT-X-KEY:'));
+  let key = null;
+  if (keyLine) {
+    const attrs = keyLine.slice(keyLine.indexOf(':') + 1);
+    if (/AES-128/i.test((attrs.match(/METHOD=([^,]+)/i) || [])[1] || '')) {
+      const uri = (attrs.match(/URI="([^"]+)"/i) || [])[1] || '';
+      key = { uri: absUrl(uri, url), iv: (attrs.match(/IV=(0x[0-9a-f]+)/i) || [])[1] || '' };
+      if (!key.uri) throw new Error('加密流缺少密钥地址');
+    }
+  }
+  const seqLine = lines.find((l) => l.startsWith('#EXT-X-MEDIA-SEQUENCE:'));
+  const seq = seqLine ? parseInt(seqLine.split(':')[1], 10) || 0 : 0;
+  const ck = key ? await cryptoKeyFor(key.uri, credentials) : null;
+
+  const segs = [];
+  for (let i = 0; i < Math.min(segUrls.length, 6); i++) {
+    const r = await fetchRaw(segUrls[i], { credentials }, 20000);
+    let buf = new Uint8Array(await r.arrayBuffer());
+    if (ck) buf = await decryptSegment(buf, ck, ivFor(key, seq + i));
+    segs.push(buf);
+  }
+  const first = segs[0];
+  const isFmp4 = first.length > 8 &&
+    String.fromCharCode(first[4], first[5], first[6], first[7]) === 'ftyp';
+  if (isFmp4) return await posterFromFmp4(initUri, segs, credentials);
+  return await posterFromTs(segs);
+}
+
+async function posterFromFmp4(initUri, segs, credentials) {
+  const parts = [];
+  if (initUri) {
+    const r = await fetchRaw(initUri, { credentials }, 20000);
+    parts.push(new Uint8Array(await r.arrayBuffer()));
+  }
+  parts.push(segs[0]);
+  const blob = new Blob(parts, { type: 'video/mp4' });
+  return await frameFromVideoBlob(blob);
+}
+
+function frameFromVideoBlob(blob) {
+  return new Promise((resolve, reject) => {
+    const v = document.createElement('video');
+    v.muted = true;
+    v.preload = 'auto';
+    v.playsInline = true;
+    const url = URL.createObjectURL(blob);
+    v.src = url;
+    const cleanup = () => { try { v.pause(); } catch (e) { } URL.revokeObjectURL(url); };
+    const to = setTimeout(() => { cleanup(); reject(new Error('视频解码超时')); }, 15000);
+    v.addEventListener('error', () => { clearTimeout(to); cleanup(); reject(new Error('视频解码失败（浏览器不支持该编码）')); });
+    v.addEventListener('loadeddata', () => {
+      try { v.currentTime = Math.min(0.1, (v.duration || 1) * 0.1); } catch (e) { }
+    });
+    v.addEventListener('seeked', () => {
+      clearTimeout(to);
+      try {
+        const c = document.createElement('canvas');
+        const scale = Math.min(1, 640 / (v.videoWidth || 640));
+        c.width = Math.max(2, Math.round((v.videoWidth || 640) * scale));
+        c.height = Math.max(2, Math.round((v.videoHeight || 360) * scale));
+        c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+        const out = c.toDataURL('image/jpeg', 0.72);
+        cleanup();
+        resolve({ ok: true, poster: out, w: v.videoWidth, h: v.videoHeight });
+      } catch (e) { cleanup(); reject(e); }
+    });
+    v.load();
+  });
+}
+
+function hex2(b) { return b.toString(16).padStart(2, '0').toUpperCase(); }
+
+function tsPacketsMap(u8) {
+  const byPid = new Map();
+  const n = Math.floor(u8.length / 188);
+  for (let p = 0; p < n; p++) {
+    const o = p * 188;
+    if (u8[o] !== 0x47) continue;
+    const pusi = (u8[o + 1] & 0x40) !== 0;
+    const pid = ((u8[o + 1] & 0x1f) << 8) | u8[o + 2];
+    const afc = (u8[o + 3] >> 4) & 0x3;
+    let i = o + 4;
+    if ((afc & 0x2) && i < o + 188) i += 1 + u8[i];
+    if (!(afc & 0x1) || i >= o + 188) continue;
+    let e = byPid.get(pid);
+    if (!e) { e = []; byPid.set(pid, e); }
+    e.push({ start: pusi, data: u8.subarray(i, o + 188) });
+  }
+  return byPid;
+}
+
+function sectionBytes(chunks) {
+  const parts = [];
+  let started = false;
+  for (const c of chunks) {
+    if (c.start && started) break;
+    if (c.start) { started = true; parts.push(c.data.subarray(1 + c.data[0])); }
+    else if (started) parts.push(c.data);
+  }
+  return started && parts.length ? concatBytes(parts) : null;
+}
+
+function pesPayloads(chunks) {
+  const out = [];
+  let cur = null;
+  for (const c of chunks) {
+    if (c.start) {
+      if (cur) out.push(cur);
+      const d = c.data;
+      const p = d.subarray(1 + d[0]);
+      if (p.length < 9 || p[0] !== 0 || p[1] !== 0 || p[2] !== 1) { cur = null; continue; }
+      cur = p.subarray(9 + p[8]);
+    } else if (cur) {
+      cur = concatBytes([cur, c.data]);
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+function splitNals(u8) {
+  const nals = [];
+  const n = u8.length;
+  let i = 0, start = -1;
+  while (i < n - 3) {
+    if (u8[i] === 0 && u8[i + 1] === 0) {
+      if (u8[i + 2] === 1) {
+        if (start >= 0) nals.push(u8.subarray(start, i));
+        start = i + 3; i += 3; continue;
+      } else if (u8[i + 2] === 0 && u8[i + 3] === 1) {
+        if (start >= 0) nals.push(u8.subarray(start, i));
+        start = i + 4; i += 4; continue;
+      }
+    }
+    i++;
+  }
+  if (start >= 0 && start < n) nals.push(u8.subarray(start, n));
+  return nals;
+}
+
+function buildAus(nals) {
+  const aus = [];
+  let cur = [], curKey = false, curVcl = false;
+  const push = () => {
+    if (cur.length && curVcl) aus.push({ nals: cur, key: curKey });
+    cur = []; curKey = false; curVcl = false;
+  };
+  for (const nal of nals) {
+    const t = nal[0] & 0x1f;
+    if (t === 9) { push(); cur.push(nal); continue; }
+    if (t >= 1 && t <= 5) {
+      if (curVcl) push();
+      cur.push(nal); curVcl = true;
+      if (t === 5) curKey = true;
+    } else {
+      if (curVcl) push();
+      cur.push(nal);
+    }
+  }
+  push();
+  return aus;
+}
+
+function tsToAnnexB(u8) {
+  const byPid = tsPacketsMap(u8);
+  let pmtPid = -1;
+  const patSec = sectionBytes(byPid.get(0) || []);
+  if (patSec) {
+    for (let i = 8; i + 4 <= patSec.length - 4; i += 4) {
+      const prog = (patSec[i] << 8) | patSec[i + 1];
+      const pid = ((patSec[i + 2] & 0x1f) << 8) | patSec[i + 3];
+      if (prog !== 0) { pmtPid = pid; break; }
+    }
+  }
+  if (pmtPid < 0) throw new Error('TS 里没有找到节目映射表');
+  const pmtSec = sectionBytes(byPid.get(pmtPid) || []);
+  if (!pmtSec) throw new Error('TS 里没有 PMT 内容');
+  const seclen = ((pmtSec[1] & 0x0f) << 8) | pmtSec[2];
+  const end = Math.min(pmtSec.length, 3 + seclen - 4);
+  const pil = ((pmtSec[10] & 0x0f) << 8) | pmtSec[11];
+  let videoPid = -1;
+  for (let i = 12 + pil; i + 5 <= end; i += 5 + (((pmtSec[i + 3] & 0x0f) << 8) | pmtSec[i + 4])) {
+    const st = pmtSec[i];
+    const pid = ((pmtSec[i + 1] & 0x1f) << 8) | pmtSec[i + 2];
+    if (st === 0x1b || st === 0x24) { videoPid = pid; break; }
+  }
+  if (videoPid < 0) throw new Error('TS 里没有 H.264 视频轨');
+  const payloads = pesPayloads(byPid.get(videoPid) || []);
+  if (!payloads.length) throw new Error('TS 里没有视频数据');
+  const nals = splitNals(concatBytes(payloads));
+  let sps = null, pps = null;
+  for (const nal of nals) {
+    const t = nal[0] & 0x1f;
+    if (t === 7 && !sps) sps = nal;
+    if (t === 8 && !pps) pps = nal;
+  }
+  const aus = buildAus(nals);
+  const keyIdx = aus.findIndex((a) => a.key);
+  if (keyIdx < 0) return { sps, pps, keyAu: null };
+  const au = aus[keyIdx];
+  const parts = [];
+  if (sps && !au.nals.some((x) => (x[0] & 0x1f) === 7)) parts.push(sps);
+  if (pps && !au.nals.some((x) => (x[0] & 0x1f) === 8)) parts.push(pps);
+  au.nals.forEach((x) => parts.push(x));
+  const pieces = [];
+  parts.forEach((x) => { pieces.push(Uint8Array.from([0, 0, 0, 1]), x); });
+  return { sps, pps, keyAu: concatBytes(pieces) };
+}
+
+async function posterFromTs(segs) {
+  if (typeof VideoDecoder === 'undefined') throw new Error('此浏览器不支持 WebCodecs，无法预览 TS 流');
+  const { sps, keyAu } = tsToAnnexB(concatBytes(segs));
+  if (!sps) throw new Error('TS 流里没有找到 SPS 参数集');
+  if (!keyAu) throw new Error('TS 前 6 段未找到关键帧，无法出图');
+  const codec = 'avc1.' + hex2(sps[1]) + hex2(sps[2]) + hex2(sps[3]);
+  const frames = [];
+  let decErr = '';
+  const dec = new VideoDecoder({
+    output: (f) => frames.push(f),
+    error: (e) => { decErr = String(e && e.message || e); }
+  });
+  try {
+    dec.configure({ codec, optimizeForLatency: true });
+  } catch (e) {
+    throw new Error('无法初始化解码器（' + codec + '）');
+  }
+  try {
+    dec.decode(new EncodedVideoChunk({ type: 'key', timestamp: 0, data: keyAu }));
+    await dec.flush();
+  } catch (e) {
+    decErr = String(e && e.message || e);
+  }
+  try { dec.close(); } catch (e) { }
+  if (!frames.length) throw new Error('解码未产出画面' + (decErr ? '：' + decErr : ''));
+  const f = frames[0];
+  const w = f.displayWidth || f.codedWidth;
+  const h = f.displayHeight || f.codedHeight;
+  const scale = Math.min(1, 640 / (w || 640));
+  const c = new OffscreenCanvas(Math.max(2, Math.round((w || 640) * scale)), Math.max(2, Math.round((h || 360) * scale)));
+  c.getContext('2d').drawImage(f, 0, 0, c.width, c.height);
+  f.close();
+  const blob = await c.convertToBlob({ type: 'image/jpeg', quality: 0.72 });
+  const poster = await blobToDataUrl(blob);
+  return { ok: true, poster, w, h };
 }

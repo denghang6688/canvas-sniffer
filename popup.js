@@ -236,9 +236,30 @@ async function scan() {
     render();
     setStatus(`已捕获 ${all.length} 条素材 · ${new URL(tab.url).hostname.replace(/^www\./, '')}`, false);
     if (state.settings.digOriginal) runDeepDig(tab.id);
+    loadHlsPosters();
   } catch (e) {
     setStatus('扫描失败：' + (e && e.message || e), false);
   } finally { state.busy = false; }
+}
+
+/* ---------------- HLS 首帧封面 ---------------- */
+async function loadHlsPosters() {
+  const list = state.assets.filter((a) => a.kind === 'hls' && !a.posterUrl).slice(0, 4);
+  for (const v of list) {
+    try {
+      const res = await chrome.runtime.sendMessage({
+        type: 'hlsPoster',
+        url: v.bestVariant || v.url,
+        credentials: state.settings.hlsCredentials ? 'include' : 'omit'
+      });
+      if (res && res.ok && res.poster) {
+        v.posterUrl = res.poster;
+        if (res.w && !v.w) { v.w = res.w; v.h = res.h; }
+        render();
+        setStatus('视频封面已生成', false);
+      }
+    } catch (e) { }
+  }
 }
 
 /* ---------------- 深挖原图 ---------------- */
